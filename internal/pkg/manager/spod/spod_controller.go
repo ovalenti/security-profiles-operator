@@ -1898,6 +1898,7 @@ func (r *ReconcileSPOd) getConfiguredWebook(cfg *spodapi.SecurityProfilesOperato
 		webhookTolerations,
 		cfg.Spec.ImagePullSecrets,
 		r.isExecMetadataEnabled(cfg),
+		cfg.Spec.Enricher.ExecMetadataEnvVars,
 	)
 	webhook.UseDaemonPriorityClass(cfg.Spec.Scheduling.PriorityClassName)
 

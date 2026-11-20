@@ -903,7 +903,7 @@ func Test_webhookTolerationsFallback(t *testing.T) {
 	}
 	baseTolerations := webhookDeploymentTolerations(t, bindata.GetWebhook(
 		logr.Discard(), testNamespace, nil, "image", v1.PullAlways,
-		bindata.CAInjectTypeCertManager, nil, nil, false,
+		bindata.CAInjectTypeCertManager, nil, nil, false, nil,
 	))
 
 	for _, tc := range []struct {

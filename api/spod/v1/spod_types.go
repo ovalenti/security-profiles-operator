@@ -398,13 +398,28 @@ type SPODEnricherConfig struct {
 	// metadata webhook rewrites every "kubectl exec" outside of the system
 	// and operator namespaces to run through the env binary of the
 	// container image, so that the enricher can attribute the syscalls to
-	// the exec request. The node debugging pod webhook injects the request
-	// UID into the pods of "kubectl debug node". Disable them for clusters
-	// with images which do not ship an env binary.
+	// the exec request. The node debugging pod webhook sets the configured
+	// environment variables in the pods of "kubectl debug node". Disable
+	// them for clusters with images which do not ship an env binary.
 	// It has no effect while the JSON enricher is disabled.
 	// +optional
 	// +default=true
 	EnableExecMetadata *bool `json:"enableExecMetadata,omitempty"`
+	// execMetadataEnvVars maps the names of the environment variables which
+	// the exec metadata webhooks set in the exec sessions, ephemeral
+	// containers and node debugging pods to the paths in the admission
+	// request of the exec or pod request which the values come from. The
+	// path is the dotted sequence of the JSON names of the fields of the
+	// request, like "uid" or "userInfo.username". The variable
+	// SPO_EXEC_REQUEST_UID with the path "uid" lets the JSON enricher
+	// attribute the processes of an exec session to its request, see
+	// Attribute exec sessions and node debugging.
+	// It has no effect while the JSON enricher is disabled.
+	// +optional
+	//nolint:lll // CEL rules cannot be wrapped
+	// +kubebuilder:validation:XValidation:rule="self.all(k, k.matches('^[A-Za-z_][A-Za-z0-9_]*$'))",message="the names must be valid environment variable names"
+	// +kubebuilder:validation:XValidation:rule="self.all(k, size(self[k]) > 0)",message="the paths must not be empty"
+	ExecMetadataEnvVars map[string]string `json:"execMetadataEnvVars,omitempty"`
 }
 
 // SPODWebhookConfig contains webhook configuration.

@@ -30,29 +30,34 @@ func TestRemoveExistingEnv(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
-		name string
-		env  []corev1.EnvVar
-		want []corev1.EnvVar
+		names []string
+		name  string
+		env   []corev1.EnvVar
+		want  []corev1.EnvVar
 	}{
-		{name: "nil"},
+		{name: "nil", names: []string{config.ExecRequestUIDEnvKey}},
 		{
-			name: "missing",
-			env:  []corev1.EnvVar{{Name: "A"}},
-			want: []corev1.EnvVar{{Name: "A"}},
+			name:  "missing",
+			names: []string{config.ExecRequestUIDEnvKey},
+			env:   []corev1.EnvVar{{Name: "A"}},
+			want:  []corev1.EnvVar{{Name: "A"}},
 		},
 		{
-			name: "only",
-			env:  []corev1.EnvVar{{Name: config.ExecRequestUIDEnvKey, Value: "x"}},
-			want: []corev1.EnvVar{},
+			name:  "only",
+			names: []string{config.ExecRequestUIDEnvKey},
+			env:   []corev1.EnvVar{{Name: config.ExecRequestUIDEnvKey, Value: "x"}},
+			want:  []corev1.EnvVar{},
 		},
 		{
-			name: "first of several",
-			env:  []corev1.EnvVar{{Name: config.ExecRequestUIDEnvKey}, {Name: "A"}, {Name: "B"}},
-			want: []corev1.EnvVar{{Name: "A"}, {Name: "B"}},
+			name:  "first of several",
+			names: []string{config.ExecRequestUIDEnvKey},
+			env:   []corev1.EnvVar{{Name: config.ExecRequestUIDEnvKey}, {Name: "A"}, {Name: "B"}},
+			want:  []corev1.EnvVar{{Name: "A"}, {Name: "B"}},
 		},
 		{
 			// A duplicate must not survive to shadow the appended variable.
-			name: "duplicates",
+			name:  "duplicates",
+			names: []string{config.ExecRequestUIDEnvKey},
 			env: []corev1.EnvVar{
 				{Name: config.ExecRequestUIDEnvKey, Value: "a"},
 				{Name: "A"},
@@ -62,15 +67,26 @@ func TestRemoveExistingEnv(t *testing.T) {
 			want: []corev1.EnvVar{{Name: "A"}},
 		},
 		{
-			name: "last of several",
-			env:  []corev1.EnvVar{{Name: "A"}, {Name: config.ExecRequestUIDEnvKey}},
-			want: []corev1.EnvVar{{Name: "A"}},
+			name:  "last of several",
+			names: []string{config.ExecRequestUIDEnvKey},
+			env:   []corev1.EnvVar{{Name: "A"}, {Name: config.ExecRequestUIDEnvKey}},
+			want:  []corev1.EnvVar{{Name: "A"}},
+		},
+		{
+			name:  "several names",
+			names: []string{config.ExecRequestUIDEnvKey, "OTHER"},
+			env: []corev1.EnvVar{
+				{Name: config.ExecRequestUIDEnvKey, Value: "a"},
+				{Name: "B"},
+				{Name: "OTHER", Value: "b"},
+			},
+			want: []corev1.EnvVar{{Name: "B"}},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := removeExistingEnv(tc.env, config.ExecRequestUIDEnvKey)
+			got := removeExistingEnv(tc.env, tc.names)
 			if tc.want == nil {
 				require.Empty(t, got)
 
@@ -82,7 +98,7 @@ func TestRemoveExistingEnv(t *testing.T) {
 	}
 }
 
-func TestSetExecRequestUID(t *testing.T) {
+func TestSetExecEnv(t *testing.T) {
 	t.Parallel()
 
 	const (
@@ -90,6 +106,10 @@ func TestSetExecRequestUID(t *testing.T) {
 		repl = key + "=new"
 		fake = key + "=fake"
 	)
+
+	uidVar := func(value string) []corev1.EnvVar {
+		return []corev1.EnvVar{{Name: key, Value: value}}
+	}
 
 	for _, tc := range []struct {
 		name string
@@ -260,7 +280,44 @@ func TestSetExecRequestUID(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			require.Equal(t, tc.want, setExecRequestUID(slices.Clone(tc.in), "new"))
+			require.Equal(t, tc.want, setExecEnv(slices.Clone(tc.in), uidVar("new")))
+		})
+	}
+
+	// Several variables get their assignments in the order of their names,
+	// and only the missing ones get appended.
+	for _, tc := range []struct {
+		name   string
+		in     []string
+		envVar []corev1.EnvVar
+		want   []string
+	}{
+		{
+			name:   "no env",
+			in:     []string{"ls"},
+			envVar: []corev1.EnvVar{{Name: "A", Value: "1"}, {Name: "B", Value: "2"}},
+			want:   []string{"env", "A=1", "B=2", "ls"},
+		},
+		{
+			name: "env with one of the variables",
+			in:   []string{"env", "B=old", "A=x", "ls"},
+			envVar: []corev1.EnvVar{
+				{Name: "A", Value: "1"},
+				{Name: "B", Value: "2"},
+				{Name: "C", Value: "3"},
+			},
+			want: []string{"env", "B=2", "A=1", "C=3", "ls"},
+		},
+		{
+			name:   "no command",
+			envVar: []corev1.EnvVar{{Name: "A", Value: "1"}},
+			want:   []string{"env", "A=1"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tc.want, setExecEnv(slices.Clone(tc.in), tc.envVar))
 		})
 	}
 }

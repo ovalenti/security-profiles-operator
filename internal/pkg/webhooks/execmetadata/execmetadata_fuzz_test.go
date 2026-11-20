@@ -39,6 +39,12 @@ import (
 // UUIDs, so the UID is not fuzzed.
 const fuzzUID = "0f6c5b6e-3c4f-4c1e-9a43-6a3c1f1d2e3f"
 
+// fuzzEnvVars are the environment variables which the fuzz tests inject,
+// the request UID, like the configuration of the audit logging guide.
+var fuzzEnvVars = []corev1.EnvVar{
+	{Name: config.ExecRequestUIDEnvKey, Value: fuzzUID},
+}
+
 func fuzzRequest(subResource string, object, oldObject []byte) *admission.Request {
 	return &admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
 		UID:         types.UID(fuzzUID),
@@ -77,7 +83,7 @@ func FuzzGetPodExecPatch(f *testing.F) {
 	handler := Handler{log: logr.Discard()}
 
 	f.Fuzz(func(t *testing.T, object []byte) {
-		patches, err := handler.getPodExecPatch(fuzzRequest("", object, nil))
+		patches, err := handler.getPodExecPatch(fuzzEnvVars, fuzzRequest("", object, nil))
 		if err != nil {
 			return
 		}
@@ -96,7 +102,7 @@ func FuzzGetPodExecPatch(f *testing.F) {
 	})
 }
 
-func TestSetExecRequestUIDRunsWithTheUID(t *testing.T) {
+func TestSetExecEnvRunsWithTheVariables(t *testing.T) {
 	t.Parallel()
 
 	const key = config.ExecRequestUIDEnvKey
@@ -120,7 +126,7 @@ func TestSetExecRequestUIDRunsWithTheUID(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			requireExecRequestUID(t, command, setExecRequestUID(slices.Clone(command), fuzzUID))
+			requireExecRequestUID(t, command, setExecEnv(slices.Clone(command), fuzzEnvVars))
 		})
 	}
 }
@@ -329,7 +335,8 @@ func FuzzGetPodPatch(f *testing.F) {
 		subResource, object, oldObject string
 	}{
 		{"", `{"spec":{"containers":[{"name":"debugger"}]}}`, ""},
-		{"", `{"spec":{"containers":[{"name":"debugger","env":[{"name":"` + config.ExecRequestUIDEnvKey + `"}]}]}}`, ""},
+		{"", `{"spec":{"containers":[{"name":"debugger","env":[{"name":"` +
+			config.ExecRequestUIDEnvKey + `"}]}]}}`, ""},
 		{"", `{"spec":{"containers":[]}}`, ""},
 		{
 			utils.EphemeralContainersSubResource,
@@ -349,7 +356,10 @@ func FuzzGetPodPatch(f *testing.F) {
 	handler := Handler{log: logr.Discard()}
 
 	f.Fuzz(func(t *testing.T, subResource string, object, oldObject []byte) {
-		patches, err := handler.getPodPatch(fuzzRequest(subResource, object, oldObject))
+		patches, err := handler.getPodPatch(
+			fuzzEnvVars,
+			fuzzRequest(subResource, object, oldObject),
+		)
 		if err != nil {
 			return
 		}

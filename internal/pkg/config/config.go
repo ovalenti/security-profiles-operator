@@ -178,6 +178,12 @@ const (
 	// attribute the processes of an exec to its request.
 	ExecRequestUIDEnvKey = "SPO_EXEC_REQUEST_UID"
 
+	// ExecMetadataEnvVarsEnvKey is the environment variable which passes
+	// the environment variables of the exec metadata webhooks, as JSON
+	// which maps their names to the paths in the admission request which
+	// their values come from, from the SPOD to the webhook pods.
+	ExecMetadataEnvVarsEnvKey = "SPO_EXEC_METADATA_ENV_VARS"
+
 	// KubeletDirNodeLabelKey is the label on a Node that specifies
 	// a custom kubelet root directory configured for this node. The directory
 	// path is provided in the following format folder-subfolder-subfolder

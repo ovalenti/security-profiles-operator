@@ -18,6 +18,7 @@ package bindata
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"iter"
 	"maps"
@@ -417,6 +418,7 @@ func GetWebhook(
 	tolerations []corev1.Toleration,
 	imagePullSecrets []corev1.LocalObjectReference,
 	execMetadataWebhookEnabled bool,
+	execMetadataEnvVars map[string]string,
 ) *Webhook {
 	deployment := webhookDeployment.DeepCopy()
 	deployment.Namespace = namespace
@@ -432,6 +434,13 @@ func GetWebhook(
 	ctr := &deployment.Spec.Template.Spec.Containers[0]
 	ctr.Image = image
 	ctr.ImagePullPolicy = pullPolicy
+
+	if execMetadataEnvVars != nil {
+		ctr.Env = append(ctr.Env, corev1.EnvVar{
+			Name:  config.ExecMetadataEnvVarsEnvKey,
+			Value: execMetadataEnvVarsValue(execMetadataEnvVars),
+		})
+	}
 
 	cfg := getWebhookConfig(execMetadataWebhookEnabled, namespace).DeepCopy()
 	cfg.Webhooks[binding.index].ClientConfig.Service.Namespace = namespace
@@ -503,6 +512,16 @@ func GetWebhook(
 // while the daemon uses its default priority class. Any other daemon priority
 // class, like the one a cluster which restricts the critical priority classes
 // needs, applies to the webhook as well.
+// execMetadataEnvVarsValue returns the exec metadata environment variables
+// of the SPOD as the JSON value of the variable which passes them to the
+// webhook pods.
+func execMetadataEnvVarsValue(envVars map[string]string) string {
+	// A map of strings to strings always marshals to JSON.
+	value, _ := json.Marshal(envVars) //nolint:errchkjson,errcheck // the map has strings only
+
+	return string(value)
+}
+
 func (w *Webhook) UseDaemonPriorityClass(daemonPriorityClassName string) {
 	if daemonPriorityClassName != DefaultPriorityClassName {
 		w.deployment.Spec.Template.Spec.PriorityClassName = daemonPriorityClassName

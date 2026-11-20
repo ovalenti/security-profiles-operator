@@ -81,6 +81,7 @@ The fields of the SPOD spec and where they are documented:
 | `enableProfiling` | [Enable CPU and memory profiling](troubleshooting.md#enable-cpu-and-memory-profiling) |
 | `enricher.enableBpfRecorder`, `enricher.enableLogEnricher` | [Enable a recorder](recording.md#enable-a-recorder) |
 | `enricher.enableExecMetadata` | [Attribute exec sessions and node debugging](audit-logging-guide.md#attribute-exec-sessions-and-node-debugging) |
+| `enricher.execMetadataEnvVars` | [Attribute exec sessions and node debugging](audit-logging-guide.md#attribute-exec-sessions-and-node-debugging) |
 | `enricher.enableJsonEnricher`, `enricher.jsonEnricherFilters`, `enricher.jsonEnricherOptions` | [Configure the JSON enricher](audit-logging-guide.md#configure-the-json-enricher) |
 | `enricher.logEnricherFilters` | [Filter the enricher logs](recording.md#filter-the-enricher-logs) |
 | `enricher.logEnricherSource` | [Select the log enricher source](#select-the-log-enricher-source) |
