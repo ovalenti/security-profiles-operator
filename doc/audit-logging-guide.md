@@ -236,27 +236,55 @@ which in most cases is root, and do not tell who started the session.
 
 The JSON enricher therefore relies on two mutating webhooks,
 `execmetadata.spo.io` and `nodedebuggingpod.spo.io`, which the operator
-deploys together with it. They set the UID of the request which started the
-session in the `SPO_EXEC_REQUEST_UID` environment variable of the session.
+deploys together with it. They set environment variables in the exec
+sessions, the ephemeral containers and the node debugging pods, which carry
+the metadata of the request which started them, so that the enricher can
+attribute the syscalls to it.
+
+`spec.enricher.execMetadataEnvVars` of the SPOD configures the variables.
+It maps their names to the paths in the admission request of the exec or pod
+request which their values come from. A path is the dotted sequence of the
+JSON names of the fields of the request, like `uid` or `userInfo.username`.
+The attribution of the JSON enricher relies on the `SPO_EXEC_REQUEST_UID`
+variable with the UID of the request:
+
+```yaml
+spec:
+  enricher:
+    execMetadataEnvVars:
+      SPO_EXEC_REQUEST_UID: uid
+```
+
+The variables can carry other metadata of the request as well, for example
+the name of the user who started the session:
+
+```yaml
+spec:
+  enricher:
+    execMetadataEnvVars:
+      SPO_EXEC_REQUEST_UID: uid
+      SPO_EXEC_USER: userInfo.username
+```
+
 The webhook starts an exec session through an env command like
 `env SPO_EXEC_REQUEST_UID=<uid> ls`, so the enricher takes the request UID of
 an env command from the assignment which the webhook added to its arguments,
 and the one of any other process from its environment, and writes it as
-`requestUID`. The webhooks also add it as an audit annotation of the
-request, which the API server writes to its audit log, if enabled, as
-`execmetadata.spo.io/SPO_EXEC_REQUEST_UID` or
+`requestUID`. The webhooks also add every variable they set as an audit
+annotation of the request, which the API server writes to its audit log, if
+enabled, like `execmetadata.spo.io/SPO_EXEC_REQUEST_UID` or
 `nodedebuggingpod.spo.io/SPO_EXEC_REQUEST_UID`. The `requestUID` thereby links
 the activity on the node to the API server audit log entry of the request,
 which records who started it.
 
 The attribution is best effort and not audit evidence. The workload controls
-the environment of its processes: a pod author can set the variable on a
-container, so that its processes carry a made-up request UID, and a process
-in an exec session can unset or change it before it starts other programs, so
-that their activity is not attributed to the exec request. If a container
-already defines `SPO_EXEC_REQUEST_UID`, the webhook's value overrides it for
+the environment of its processes: a pod author can set the variables on a
+container, so that its processes carry made-up values, and a process
+in an exec session can unset or change them before it starts other programs,
+so that their activity is not attributed to the exec request. If a container
+already defines one of the variables, the webhook's value overrides it for
 the exec session. Use the API server audit log as the record of who started
-an exec session or a debug pod, and the `requestUID` only to correlate the
+an exec session or a debug pod, and the variables only to correlate the
 node activity with it.
 
 `spec.enricher.enableExecMetadata` of the SPOD controls both webhooks and
@@ -266,7 +294,7 @@ defaults to `true`. It has no effect while the JSON enricher is disabled.
 
 The `execmetadata.spo.io` webhook rewrites every `kubectl exec` to run through
 the `env` binary of the container image, so that the session gets the
-variable. Images without an `env` binary then fail to exec. Disable the
+variables. Images without an `env` binary then fail to exec. Disable the
 webhooks for such clusters:
 
 ```shell
@@ -274,7 +302,7 @@ kubectl -n security-profiles-operator patch spod spod --type merge \
   -p '{"spec":{"enricher":{"enableExecMetadata":false}}}'
 ```
 
-The webhook also sets the variable in the ephemeral containers which
+The webhook also sets the variables in the ephemeral containers which
 `kubectl debug <pod>` adds to a pod, when they get added. The environment of
 ephemeral containers which exist already cannot change.
 
@@ -284,7 +312,7 @@ By default, `execmetadata.spo.io` applies to all namespaces except
 ### Node debugging sessions
 
 `kubectl debug node/<node-name>` starts a debug pod on the node. The
-`nodedebuggingpod.spo.io` webhook sets `SPO_EXEC_REQUEST_UID` in the debug
+`nodedebuggingpod.spo.io` webhook sets the variables in the debug
 pods of all namespaces. It selects them by the label
 `app.kubernetes.io/managed-by: kubectl-debug`, which `kubectl debug` adds to
 them since [kubectl debug: add label for debugger pod](https://github.com/kubernetes/kubernetes/pull/131791),

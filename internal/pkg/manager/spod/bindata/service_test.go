@@ -183,7 +183,7 @@ func TestWebhookServiceRestored(t *testing.T) {
 	t.Parallel()
 
 	w := GetWebhook(logr.Discard(), "spo-ns", nil, "image",
-		corev1.PullAlways, CAInjectTypeCertManager, nil, nil, false)
+		corev1.PullAlways, CAInjectTypeCertManager, nil, nil, false, nil)
 	c := webhookTestClient(t)
 	require.NoError(t, w.Create(t.Context(), c))
 
@@ -242,7 +242,7 @@ func TestUpdateDeploymentCacheBehind(t *testing.T) {
 	t.Parallel()
 
 	w := GetWebhook(logr.Discard(), "spo-ns", nil, "image",
-		corev1.PullAlways, CAInjectTypeCertManager, nil, nil, false)
+		corev1.PullAlways, CAInjectTypeCertManager, nil, nil, false, nil)
 
 	c := fake.NewClientBuilder().WithObjects(w.deployment.DeepCopy()).WithInterceptorFuncs(
 		interceptor.Funcs{

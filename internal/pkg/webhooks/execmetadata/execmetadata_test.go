@@ -87,11 +87,16 @@ func getPodExecAdmRequest(
 	}
 }
 
+// testEnvVars configures the request UID, like the audit logging guide
+// describes for the attribution of exec sessions.
+var testEnvVars = map[string]string{config.ExecRequestUIDEnvKey: "uid"}
+
 func TestHandler_Handle(t *testing.T) {
 	t.Parallel()
 
 	type fields struct {
-		log logr.Logger
+		log     logr.Logger
+		envVars map[string]string
 	}
 
 	type args struct {
@@ -107,8 +112,133 @@ func TestHandler_Handle(t *testing.T) {
 		want   admission.Response
 	}{
 		{
-			name:   "Basic Test for Node Debugging Pod",
+			name:   "No configured env vars leaves the request unmodified",
 			fields: fields{log: logr.Discard()},
+			args: args{t.Context(), admission.Request{
+				AdmissionRequest: getPodExecAdmRequest(t, &corev1.PodExecOptions{
+					Command: []string{"echo", "hello"},
+				}),
+			}},
+			want: admission.Response{
+				AdmissionResponse: admissionv1.AdmissionResponse{
+					Allowed: true,
+					Result: &metav1.Status{
+						Code:    200,
+						Message: "pod exec request unmodified",
+					},
+				},
+			},
+		},
+		{
+			name:   "Unresolvable path warns and leaves the request unmodified",
+			fields: fields{log: logr.Discard(), envVars: map[string]string{"FOO": "nope.nope"}},
+			args: args{t.Context(), admission.Request{
+				AdmissionRequest: getPodExecAdmRequest(t, &corev1.PodExecOptions{
+					Command: []string{"echo", "hello"},
+				}),
+			}},
+			want: admission.Response{
+				AdmissionResponse: admissionv1.AdmissionResponse{
+					Allowed: true,
+					Result: &metav1.Status{
+						Code:    200,
+						Message: "pod exec request unmodified",
+					},
+					Warnings: []string{
+						"the security profiles operator did not set FOO: " +
+							"the admission request has no field \"nope\"",
+					},
+				},
+			},
+		},
+		{
+			name: "Custom env var from the user of the request",
+			fields: fields{
+				log:     logr.Discard(),
+				envVars: map[string]string{"SPO_EXEC_USER": "userInfo.username"},
+			},
+			args: args{t.Context(), admission.Request{
+				AdmissionRequest: func() admissionv1.AdmissionRequest {
+					req := getPodExecAdmRequest(t, &corev1.PodExecOptions{
+						Command: []string{"echo", "hello"},
+					})
+					req.UserInfo.Username = "alice"
+
+					return req
+				}(),
+			}},
+			want: admission.Response{
+				Patches: []gomodulesjsonpatch.JsonPatchOperation{
+					{
+						Operation: "add",
+						Path:      "/command",
+						Value: []string{
+							"env",
+							"SPO_EXEC_USER=alice",
+							"echo",
+							"hello",
+						},
+					},
+				},
+				AdmissionResponse: admissionv1.AdmissionResponse{
+					Allowed: true,
+					Result: &metav1.Status{
+						Code:    200,
+						Message: "environment variables added to execmetadata",
+					},
+					AuditAnnotations: map[string]string{
+						"SPO_EXEC_USER": "alice",
+					},
+				},
+			},
+		},
+		{
+			name: "Two env vars from the pod of the request",
+			fields: fields{log: logr.Discard(), envVars: map[string]string{
+				"SPO_EXEC_POD": "name",
+				"SPO_EXEC_NS":  "namespace",
+			}},
+			args: args{t.Context(), admission.Request{
+				AdmissionRequest: func() admissionv1.AdmissionRequest {
+					req := getPodExecAdmRequest(t, &corev1.PodExecOptions{
+						Command: []string{"echo", "hello"},
+					})
+					req.Name = "pod-1"
+					req.Namespace = "ns-1"
+
+					return req
+				}(),
+			}},
+			want: admission.Response{
+				Patches: []gomodulesjsonpatch.JsonPatchOperation{
+					{
+						Operation: "add",
+						Path:      "/command",
+						Value: []string{
+							"env",
+							"SPO_EXEC_NS=ns-1",
+							"SPO_EXEC_POD=pod-1",
+							"echo",
+							"hello",
+						},
+					},
+				},
+				AdmissionResponse: admissionv1.AdmissionResponse{
+					Allowed: true,
+					Result: &metav1.Status{
+						Code:    200,
+						Message: "environment variables added to execmetadata",
+					},
+					AuditAnnotations: map[string]string{
+						"SPO_EXEC_NS":  "ns-1",
+						"SPO_EXEC_POD": "pod-1",
+					},
+				},
+			},
+		},
+		{
+			name:   "Basic Test for Node Debugging Pod",
+			fields: fields{log: logr.Discard(), envVars: testEnvVars},
 			args: args{t.Context(), admission.Request{
 				AdmissionRequest: getPodAdmRequest(t, &corev1.Pod{
 					Spec: corev1.PodSpec{
@@ -134,7 +264,7 @@ func TestHandler_Handle(t *testing.T) {
 					Allowed: true,
 					Result: &metav1.Status{
 						Code:    200,
-						Message: "UID added to execmetadata",
+						Message: "environment variables added to execmetadata",
 					},
 					AuditAnnotations: map[string]string{
 						config.ExecRequestUIDEnvKey: "test-uid",
@@ -144,7 +274,7 @@ func TestHandler_Handle(t *testing.T) {
 		},
 		{
 			name:   "Basic Test for Pod Debug",
-			fields: fields{log: logr.Discard()},
+			fields: fields{log: logr.Discard(), envVars: testEnvVars},
 			args: args{t.Context(), admission.Request{
 				AdmissionRequest: getPodAdmRequest(t, &corev1.Pod{
 					Spec: corev1.PodSpec{
@@ -173,7 +303,7 @@ func TestHandler_Handle(t *testing.T) {
 					Allowed: true,
 					Result: &metav1.Status{
 						Code:    200,
-						Message: "UID added to execmetadata",
+						Message: "environment variables added to execmetadata",
 					},
 					AuditAnnotations: map[string]string{
 						config.ExecRequestUIDEnvKey: "test-uid",
@@ -183,7 +313,7 @@ func TestHandler_Handle(t *testing.T) {
 		},
 		{
 			name:   "Duplicate Test for Pod Debug",
-			fields: fields{log: logr.Discard()},
+			fields: fields{log: logr.Discard(), envVars: testEnvVars},
 			args: args{t.Context(), admission.Request{
 				AdmissionRequest: getPodAdmRequest(t, &corev1.Pod{
 					Spec: corev1.PodSpec{
@@ -218,7 +348,7 @@ func TestHandler_Handle(t *testing.T) {
 					Allowed: true,
 					Result: &metav1.Status{
 						Code:    200,
-						Message: "UID added to execmetadata",
+						Message: "environment variables added to execmetadata",
 					},
 					AuditAnnotations: map[string]string{
 						config.ExecRequestUIDEnvKey: "test-uid",
@@ -228,7 +358,7 @@ func TestHandler_Handle(t *testing.T) {
 		},
 		{
 			name:   "Basic Test for PodExec",
-			fields: fields{log: logr.Discard()},
+			fields: fields{log: logr.Discard(), envVars: testEnvVars},
 			args: args{t.Context(), admission.Request{
 				AdmissionRequest: getPodExecAdmRequest(t, &corev1.PodExecOptions{
 					Command: []string{"echo", "hello"},
@@ -255,7 +385,7 @@ func TestHandler_Handle(t *testing.T) {
 					Allowed: true,
 					Result: &metav1.Status{
 						Code:    200,
-						Message: "UID added to execmetadata",
+						Message: "environment variables added to execmetadata",
 					},
 					AuditAnnotations: map[string]string{
 						config.ExecRequestUIDEnvKey: "test-uid",
@@ -265,7 +395,7 @@ func TestHandler_Handle(t *testing.T) {
 		},
 		{
 			name:   "Having duplicate env vars Test",
-			fields: fields{log: logr.Discard()},
+			fields: fields{log: logr.Discard(), envVars: testEnvVars},
 			args: args{t.Context(), admission.Request{
 				AdmissionRequest: getPodExecAdmRequest(t, &corev1.PodExecOptions{
 					Command: []string{
@@ -297,7 +427,7 @@ func TestHandler_Handle(t *testing.T) {
 					Allowed: true,
 					Result: &metav1.Status{
 						Code:    200,
-						Message: "UID added to execmetadata",
+						Message: "environment variables added to execmetadata",
 					},
 					AuditAnnotations: map[string]string{
 						config.ExecRequestUIDEnvKey: "test-uid",
@@ -311,7 +441,8 @@ func TestHandler_Handle(t *testing.T) {
 			t.Parallel()
 
 			p := Handler{
-				log: tt.fields.log,
+				log:     tt.fields.log,
+				envVars: tt.fields.envVars,
 			}
 			require.Equal(t, tt.want, p.Handle(tt.args.in0, tt.args.req))
 		})
@@ -348,7 +479,7 @@ func TestHandlerPatchAppliesToContainerWithoutEnv(t *testing.T) {
 
 			req := admission.Request{AdmissionRequest: getPodAdmRequest(t, tc.pod, tc.resource)}
 
-			resp := Handler{log: logr.Discard()}.Handle(t.Context(), req)
+			resp := Handler{log: logr.Discard(), envVars: testEnvVars}.Handle(t.Context(), req)
 			require.True(t, resp.Allowed)
 			require.NotEmpty(t, resp.Patches)
 
@@ -401,7 +532,8 @@ func TestHandlerPatchesOnlyNewEphemeralContainers(t *testing.T) {
 	}()}
 
 	resp := Handler{
-		log: logr.Discard(),
+		log:     logr.Discard(),
+		envVars: testEnvVars,
 	}.Handle(
 		t.Context(),
 		admission.Request{AdmissionRequest: req},
@@ -414,11 +546,17 @@ func TestHandlerPatchesOnlyNewEphemeralContainers(t *testing.T) {
 func TestHandlerIgnoresOtherSubResources(t *testing.T) {
 	t.Parallel()
 
-	resp := Handler{log: logr.Discard()}.Handle(t.Context(), admission.Request{
-		AdmissionRequest: getPodAdmRequest(t, &corev1.Pod{
-			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "ctr"}}},
-		}, "status"),
-	})
+	resp := Handler{
+		log:     logr.Discard(),
+		envVars: testEnvVars,
+	}.Handle(
+		t.Context(),
+		admission.Request{
+			AdmissionRequest: getPodAdmRequest(t, &corev1.Pod{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "ctr"}}},
+			}, "status"),
+		},
+	)
 
 	require.True(t, resp.Allowed)
 	require.Empty(t, resp.Patches)
@@ -464,7 +602,7 @@ func TestHandlerSkipsWindowsPodExec(t *testing.T) {
 			req.Namespace = "ns"
 			req.Name = tc.pod
 
-			resp := Handler{log: logr.Discard(), reader: reader}.Handle(
+			resp := Handler{log: logr.Discard(), reader: reader, envVars: testEnvVars}.Handle(
 				t.Context(), admission.Request{AdmissionRequest: req},
 			)
 			require.True(t, resp.Allowed)

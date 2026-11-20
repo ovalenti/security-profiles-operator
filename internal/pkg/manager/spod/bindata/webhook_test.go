@@ -466,6 +466,7 @@ func TestRecordingWebhookSelectors(t *testing.T) {
 		nil,
 		nil,
 		false,
+		nil,
 	)
 	require.Equal(t, webhook.RecordingNamespaceSelector(), namespaceSelector)
 	require.Equal(t, webhook.config.Webhooks[recording.index].ObjectSelector, objectSelector)
@@ -476,12 +477,38 @@ func TestRecordingWebhookSelectors(t *testing.T) {
 	require.Equal(t, &excludeOperatorPods, objectSelector)
 }
 
+// The exec metadata environment variables of the SPOD get passed to the
+// webhook pods as JSON, so that the webhook sets them.
+func TestWebhook_ExecMetadataEnvVars(t *testing.T) {
+	t.Parallel()
+
+	sut := GetWebhook(
+		logr.Discard(), "test-ns", nil, "image", corev1.PullAlways,
+		CAInjectTypeCertManager, nil, nil, false, nil,
+	)
+	require.Len(t, sut.deployment.Spec.Template.Spec.Containers[0].Env, 1)
+
+	envVars := map[string]string{
+		config.ExecRequestUIDEnvKey: "uid",
+		"SPO_EXEC_USER":             "userInfo.username",
+	}
+
+	sut = GetWebhook(
+		logr.Discard(), "test-ns", nil, "image", corev1.PullAlways,
+		CAInjectTypeCertManager, nil, nil, false, envVars,
+	)
+	require.Contains(t, sut.deployment.Spec.Template.Spec.Containers[0].Env, corev1.EnvVar{
+		Name:  config.ExecMetadataEnvVarsEnvKey,
+		Value: `{"SPO_EXEC_REQUEST_UID":"uid","SPO_EXEC_USER":"userInfo.username"}`,
+	})
+}
+
 func TestWebhook_DeploymentSecurityContext(t *testing.T) {
 	t.Parallel()
 
 	sut := GetWebhook(
 		logr.Discard(), "test-ns", nil, "image", corev1.PullAlways,
-		CAInjectTypeCertManager, nil, nil, false,
+		CAInjectTypeCertManager, nil, nil, false, nil,
 	)
 
 	podSpec := sut.deployment.Spec.Template.Spec
@@ -577,7 +604,7 @@ func newTestWebhook(t *testing.T, tolerations []corev1.Toleration) *Webhook {
 
 	return GetWebhook(
 		logr.Discard(), "spo-ns", nil, "image", corev1.PullAlways,
-		CAInjectTypeCertManager, tolerations, nil, false,
+		CAInjectTypeCertManager, tolerations, nil, false, nil,
 	)
 }
 
@@ -796,7 +823,7 @@ func TestWebhook_DeploymentUpdate(t *testing.T) {
 	// An image change is detected as well.
 	image := GetWebhook(
 		logr.Discard(), "spo-ns", nil, "new-image", corev1.PullAlways,
-		CAInjectTypeCertManager, nil, nil, false,
+		CAInjectTypeCertManager, nil, nil, false, nil,
 	)
 	needsUpdate, err = image.NeedsUpdate(ctx, c)
 	require.NoError(t, err)
@@ -993,7 +1020,7 @@ func TestWebhook_NeedsUpdateOnAKS(t *testing.T) {
 			webhook := func(opts []spodapi.WebhookOptions) *Webhook {
 				return GetWebhook(
 					logr.Discard(), "spo-ns", opts, "image", corev1.PullAlways,
-					CAInjectTypeCertManager, nil, nil, false,
+					CAInjectTypeCertManager, nil, nil, false, nil,
 				)
 			}
 
@@ -1169,7 +1196,7 @@ func TestWebhook_BindingWarnings(t *testing.T) {
 	newWebhook := func(opts ...spodapi.WebhookOptions) *Webhook {
 		return GetWebhook(
 			logr.Discard(), "spo-ns", opts, "image", corev1.PullAlways,
-			CAInjectTypeCertManager, nil, nil, false,
+			CAInjectTypeCertManager, nil, nil, false, nil,
 		)
 	}
 
@@ -1225,7 +1252,7 @@ func TestWebhook_BindingOptionsApplyToImageUpdates(t *testing.T) {
 				NamespaceSelector: userSelector,
 				ObjectSelector:    objectSelector,
 			},
-		}, "image", corev1.PullAlways, CAInjectTypeCertManager, nil, nil, false,
+		}, "image", corev1.PullAlways, CAInjectTypeCertManager, nil, nil, false, nil,
 	)
 
 	hook := w.validatingConfig.Webhooks[bindingImageUpdate.index]

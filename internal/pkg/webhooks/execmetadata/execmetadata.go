@@ -40,11 +40,22 @@ import (
 
 var errUnsupportedSubResource = errors.New("unsupported pod sub resource")
 
+// envCommand is the env binary which the exec sessions run through, so that
+// they get the environment variables set.
+const envCommand = "env"
+
 type Handler struct {
 	log logr.Logger
 
 	// reader looks up the pod of an exec request. Nil skips the lookup.
 	reader client.Reader
+
+	// envVars maps the names of the environment variables which get set
+	// in exec sessions, ephemeral containers and node debugging pods to
+	// the paths in the admission request which the values come from, like
+	// "uid" or "userInfo.username". Nil or empty leaves the requests
+	// unmodified.
+	envVars map[string]string
 }
 
 // Ensure ExecMetadataHandler implements admission.Handler at compile time.
@@ -53,19 +64,21 @@ var _ admission.Handler = (*Handler)(nil)
 // getPodPatch returns the patch for a pod. The API server sends requests for
 // the ephemeral containers sub resource with the "pods" resource and the sub
 // resource set separately, so the sub resource decides about the patch.
-func (p Handler) getPodPatch(req *admission.Request) ([]jsonpatch.JsonPatchOperation, error) {
+func (p Handler) getPodPatch(
+	envVars []corev1.EnvVar, req *admission.Request,
+) ([]jsonpatch.JsonPatchOperation, error) {
 	switch req.SubResource {
 	case "":
-		return p.getNodeDebuggingPodPatch(req)
+		return p.getNodeDebuggingPodPatch(envVars, req)
 	case utils.EphemeralContainersSubResource:
-		return p.getEphemeralContainerPatch(req)
+		return p.getEphemeralContainerPatch(envVars, req)
 	default:
 		return nil, fmt.Errorf("%w: %s", errUnsupportedSubResource, req.SubResource)
 	}
 }
 
 func (p Handler) getNodeDebuggingPodPatch(
-	req *admission.Request,
+	envVars []corev1.EnvVar, req *admission.Request,
 ) ([]jsonpatch.JsonPatchOperation, error) {
 	patches := make([]jsonpatch.JsonPatchOperation, 0, 1)
 
@@ -82,11 +95,8 @@ func (p Handler) getNodeDebuggingPodPatch(
 	}
 
 	container := podObject.Spec.Containers[0]
-	container.Env = removeExistingEnv(container.Env, config.ExecRequestUIDEnvKey)
-	container.Env = append(
-		container.Env,
-		corev1.EnvVar{Name: config.ExecRequestUIDEnvKey, Value: string(req.UID)},
-	)
+	container.Env = removeExistingEnv(container.Env, envVarNames(envVars))
+	container.Env = append(container.Env, envVars...)
 
 	// "add" rather than "replace": Container.Env is omitempty, so the member is
 	// absent for a container that declares no environment variables and RFC 6902
@@ -103,7 +113,7 @@ func (p Handler) getNodeDebuggingPodPatch(
 }
 
 func (p Handler) getEphemeralContainerPatch(
-	req *admission.Request,
+	envVars []corev1.EnvVar, req *admission.Request,
 ) ([]jsonpatch.JsonPatchOperation, error) {
 	patches := make([]jsonpatch.JsonPatchOperation, 0)
 
@@ -133,11 +143,8 @@ func (p Handler) getEphemeralContainerPatch(
 			continue
 		}
 
-		container.Env = removeExistingEnv(container.Env, config.ExecRequestUIDEnvKey)
-		container.Env = append(
-			container.Env,
-			corev1.EnvVar{Name: config.ExecRequestUIDEnvKey, Value: string(req.UID)},
-		)
+		container.Env = removeExistingEnv(container.Env, envVarNames(envVars))
+		container.Env = append(container.Env, envVars...)
 
 		patches = append(patches, jsonpatch.JsonPatchOperation{
 			Operation: "add",
@@ -151,15 +158,28 @@ func (p Handler) getEphemeralContainerPatch(
 	return patches, nil
 }
 
-// removeExistingEnv removes every environment variable with the key, so that
-// a duplicated one cannot shadow the variable which gets appended.
-func removeExistingEnv(env []corev1.EnvVar, key string) []corev1.EnvVar {
+// removeExistingEnv removes every environment variable with one of the
+// names, so that a duplicated one cannot shadow the variables which get
+// appended.
+func removeExistingEnv(env []corev1.EnvVar, names []string) []corev1.EnvVar {
 	return slices.DeleteFunc(env, func(envVar corev1.EnvVar) bool {
-		return envVar.Name == key
+		return slices.Contains(names, envVar.Name)
 	})
 }
 
-func (p Handler) getPodExecPatch(req *admission.Request) ([]jsonpatch.JsonPatchOperation, error) {
+// envVarNames returns the names of the environment variables.
+func envVarNames(envVars []corev1.EnvVar) []string {
+	names := make([]string, len(envVars))
+	for i := range envVars {
+		names[i] = envVars[i].Name
+	}
+
+	return names
+}
+
+func (p Handler) getPodExecPatch(
+	envVars []corev1.EnvVar, req *admission.Request,
+) ([]jsonpatch.JsonPatchOperation, error) {
 	patches := make([]jsonpatch.JsonPatchOperation, 0, 1)
 
 	execObject := corev1.PodExecOptions{}
@@ -170,7 +190,7 @@ func (p Handler) getPodExecPatch(req *admission.Request) ([]jsonpatch.JsonPatchO
 
 	p.log.V(1).Info("execObject before mutate", "execObject", execObject)
 
-	execObject.Command = setExecRequestUID(execObject.Command, string(req.UID))
+	execObject.Command = setExecEnv(execObject.Command, envVars)
 
 	p.log.V(1).Info("execObject after mutate", "execObject", execObject)
 
@@ -181,71 +201,87 @@ func (p Handler) getPodExecPatch(req *admission.Request) ([]jsonpatch.JsonPatchO
 	}), nil
 }
 
-// setExecRequestUID makes the command run with the request UID. The leading
-// env commands of the command get parsed, every assignment of the variable in
-// them gets the request UID, and the innermost env command ends its
-// assignments with it, so that neither an assignment nor an option like -i or
-// -u of the command can replace or remove it. Arguments of the command which
-// runs are never changed. A command which is not an env command runs through
-// one, which takes its leading arguments with a "=" for assignments as well.
-// An env command with an option which is not known, like -S which splits a
-// string into more arguments, gets an env command which sets the variable
-// prepended. The command can still change the variable, see the
-// documentation of the exec metadata.
-func setExecRequestUID(command []string, uid string) []string {
-	assignment := config.ExecRequestUIDEnvKey + "=" + uid
+// setExecEnv makes the command run with the environment variables. The
+// leading env commands of the command get parsed, every assignment of one
+// of the variables in them gets its value, and the innermost env command
+// ends its assignments with the ones it misses, so that neither an
+// assignment nor an option like -i or -u of the command can replace or
+// remove them. Arguments of the command which runs are never changed. A
+// command which is not an env command runs through one, which takes its
+// leading arguments with a "=" for assignments as well. An env command
+// with an option which is not known, like -S which splits a string into
+// more arguments, gets an env command which sets the variables prepended.
+// The command can still change the variables, see the documentation of the
+// exec metadata.
+func setExecEnv(command []string, envVars []corev1.EnvVar) []string {
+	assignments := make([]string, len(envVars))
+	for i := range envVars {
+		assignments[i] = envVars[i].Name + "=" + envVars[i].Value
+	}
 
 	withEnv := command
 
 	switch {
 	case len(command) > 0 && strings.HasPrefix(command[0], "-"):
 		// The command must not become an option of env.
-		withEnv = append([]string{"env", "--"}, command...)
-	case len(command) == 0 || path.Base(command[0]) != "env":
-		withEnv = append([]string{"env"}, command...)
+		withEnv = append([]string{envCommand, "--"}, command...)
+	case len(command) == 0 || path.Base(command[0]) != envCommand:
+		withEnv = append([]string{envCommand}, command...)
 	}
 
 	layers, ok := parseEnvLayers(withEnv)
 	if !ok {
-		return slices.Insert(command, 0, "env", assignment)
+		return slices.Insert(command, 0, append([]string{envCommand}, assignments...)...)
 	}
 
 	command = withEnv
 
-	innermostHasAssignment := false
+	// set tells for every variable whether the innermost env command
+	// assigns it, so that only the missing assignments get appended.
+	set := make([]bool, len(envVars))
 
 	for i, layer := range layers {
 		for j := layer.assignments; j < layer.end; j++ {
-			if strings.HasPrefix(command[j], config.ExecRequestUIDEnvKey+"=") {
-				command[j] = assignment
+			for k := range envVars {
+				if strings.HasPrefix(command[j], envVars[k].Name+"=") {
+					command[j] = assignments[k]
 
-				if i == len(layers)-1 {
-					innermostHasAssignment = true
+					if i == len(layers)-1 {
+						set[k] = true
+					}
 				}
 			}
 		}
 	}
 
-	if innermostHasAssignment {
+	missing := make([]string, 0, len(assignments))
+
+	for k := range envVars {
+		if !set[k] {
+			missing = append(missing, assignments[k])
+		}
+	}
+
+	if len(missing) == 0 {
 		return command
 	}
 
-	return slices.Insert(command, layers[len(layers)-1].end, assignment)
+	return slices.Insert(command, layers[len(layers)-1].end, missing...)
 }
 
-// EnvCommandRequestUID returns the request UID which setExecRequestUID
-// assigned in the arguments of an env command, and false if the arguments are
-// no env command or have none. The leading env commands get parsed like
-// setExecRequestUID does: every assignment of the variable in them has the
-// request UID, the last one of the innermost env command being the one which
-// env applies last. For an env command with an option which is not known, the
-// request UID is in the env command which setExecRequestUID prepended, which
-// is the first assignment in the arguments of its process. The process of
-// the env command it runs has it in its environment instead, which the caller
-// reads then. Options and their arguments, like the directory of -C, are no
+// EnvCommandRequestUID returns the request UID which setExecEnv assigned
+// in the arguments of an env command, and false if the arguments are no env
+// command or have none. The leading env commands get parsed like setExecEnv
+// does: every assignment of the variable in them has the request UID, the
+// last one of the innermost env command being the one which env applies
+// last. For an env command with an option which is not known, the request
+// UID is in the env command which setExecEnv prepended, which is the first
+// assignment in the arguments of its process. The process of the env
+// command it runs has it in its environment instead, which the caller reads
+// then. Options and their arguments, like the directory of -C, are no
 // assignments.
 func EnvCommandRequestUID(args []string) (string, bool) {
-	if len(args) == 0 || path.Base(args[0]) != "env" {
+	if len(args) == 0 || path.Base(args[0]) != envCommand {
 		return "", false
 	}
 
@@ -288,7 +324,7 @@ type envLayer struct {
 func parseEnvLayers(command []string) ([]envLayer, bool) {
 	var layers []envLayer
 
-	for i := 0; i < len(command) && path.Base(command[i]) == "env"; {
+	for i := 0; i < len(command) && path.Base(command[i]) == envCommand; {
 		i++
 
 	options:
@@ -407,7 +443,9 @@ func (p Handler) isWindowsPodExec(ctx context.Context, req *admission.Request) b
 func (p Handler) Handle(ctx context.Context, req admission.Request) admission.Response {
 	p.log.V(1).Info("Executing execmetadata webhook")
 
-	patchGenerators := map[string]func(req *admission.Request) ([]jsonpatch.JsonPatchOperation, error){
+	patchGenerators := map[string]func(envVars []corev1.EnvVar, req *admission.Request) (
+		[]jsonpatch.JsonPatchOperation, error,
+	){
 		"PodExecOptions": p.getPodExecPatch,
 		"Pod":            p.getPodPatch,
 	}
@@ -419,6 +457,17 @@ func (p Handler) Handle(ctx context.Context, req admission.Request) admission.Re
 		return admission.Allowed("pod exec request unmodified")
 	}
 
+	envVars, warnings := p.envVarsFor(&req)
+
+	if len(envVars) == 0 {
+		// No variable to set, either because none is configured or because
+		// none of them resolves. The warnings report the ones which do not.
+		resp := admission.Allowed("pod exec request unmodified")
+		resp.Warnings = append(resp.Warnings, warnings...)
+
+		return resp
+	}
+
 	if req.Kind.Kind == "PodExecOptions" && p.isWindowsPodExec(ctx, &req) {
 		p.log.V(1).
 			Info("Windows pod, allowing request", "namespace", req.Namespace, "pod", req.Name)
@@ -426,23 +475,27 @@ func (p Handler) Handle(ctx context.Context, req admission.Request) admission.Re
 		return admission.Allowed("windows pod exec request unmodified")
 	}
 
-	jsonPathOps, err := patchFunc(&req)
+	jsonPathOps, err := patchFunc(envVars, &req)
 	if err != nil {
 		p.log.Error(err, "Failed to generate json patch", "kind", req.Kind.Kind)
 
 		// The webhook fails open, but the client learns that the request
 		// carries no exec metadata.
-		return admission.Allowed("pod exec request unmodified").WithWarnings(
+		resp := admission.Allowed("pod exec request unmodified").WithWarnings(
 			"the security profiles operator did not add the exec metadata: " + err.Error(),
 		)
+		resp.Warnings = append(resp.Warnings, warnings...)
+
+		return resp
 	}
 
-	resp := admission.Patched("UID added to execmetadata", jsonPathOps...)
+	resp := admission.Patched("environment variables added to execmetadata", jsonPathOps...)
 
-	// The RequestUid will be used to correlate the log from container and API server
-	resp.AuditAnnotations = map[string]string{
-		config.ExecRequestUIDEnvKey: string(req.UID),
-	}
+	// The values of the environment variables get recorded as audit
+	// annotations, to correlate the log from the container and the API
+	// server.
+	resp.AuditAnnotations = auditAnnotations(envVars)
+	resp.Warnings = append(resp.Warnings, warnings...)
 
 	p.log.V(1).Info("response sent", "resp", resp)
 
@@ -454,14 +507,17 @@ func (p Handler) Handle(ctx context.Context, req admission.Request) admission.Re
 
 // RegisterWebhook registers the webhook. The reader looks up the pods of exec
 // requests, and should read from the API server rather than from a cache,
-// because the webhook does not cache pods otherwise.
-func RegisterWebhook(server webhook.Server, reader client.Reader) {
+// because the webhook does not cache pods otherwise. The envVars map the
+// names of the environment variables which get set to the paths in the
+// admission request which the values come from, see EnvVarsFromEnv.
+func RegisterWebhook(server webhook.Server, reader client.Reader, envVars map[string]string) {
 	server.Register(
 		config.ExecMetadataWebhookPath,
 		&webhook.Admission{
 			Handler: &Handler{
-				log:    logf.Log.WithName("execmetadata"),
-				reader: reader,
+				log:     logf.Log.WithName("execmetadata"),
+				reader:  reader,
+				envVars: envVars,
 			},
 		},
 	)

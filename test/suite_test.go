@@ -1433,7 +1433,8 @@ func (e *e2e) enableJsonEnricherInSpod() {
 	e.logf("Enable json-enricher in SPOD with 20 second flush interval")
 
 	e.patchSpod(fmt.Sprintf(`{"spec":{"verbosity": %d, "enricher":{"enableLogEnricher": false,
-		"enableJsonEnricher": true, "jsonEnricherOptions":{"auditLogIntervalSeconds":20}}}}`,
+		"enableJsonEnricher": true, "jsonEnricherOptions":{"auditLogIntervalSeconds":20},
+		"execMetadataEnvVars":{"SPO_EXEC_REQUEST_UID":"uid"}}}}`,
 		config.VerboseLevel))
 
 	if !e.checkExecWebhook(podStartTimeout) {
@@ -1512,7 +1513,8 @@ func (e *e2e) enableJsonEnricherInSpodFileOptions(logPath, enricherFilterJsonStr
 	e.patchSpod(
 		fmt.Sprintf(
 			`{"spec":{"verbosity": %d, "enricher":{"enableLogEnricher": false,"enableJsonEnricher": true,
-		"jsonEnricherOptions":{"auditLogIntervalSeconds":20,"auditLogPath": "%s"},"jsonEnricherFilters": "%s"}}}`,
+		"jsonEnricherOptions":{"auditLogIntervalSeconds":20,"auditLogPath": "%s"},"jsonEnricherFilters": "%s",
+		"execMetadataEnvVars":{"SPO_EXEC_REQUEST_UID":"uid"}}}`,
 			config.VerboseLevel,
 			logPath,
 			enricherFilterJsonStr,

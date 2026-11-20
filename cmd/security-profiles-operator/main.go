@@ -1811,7 +1811,13 @@ func runWebhook(ctx *cli.Context, info *version.Info) error {
 		util.NewEventRecorder(mgr, "recording-webhook"),
 		mgr.GetClient(),
 	)
-	execmetadata.RegisterWebhook(hookserver, mgr.GetAPIReader())
+
+	execMetadataEnvVars, err := execmetadata.EnvVarsFromEnv(config.ExecMetadataEnvVarsEnvKey)
+	if err != nil {
+		return fmt.Errorf("get the exec metadata environment variables: %w", err)
+	}
+
+	execmetadata.RegisterWebhook(hookserver, mgr.GetAPIReader(), execMetadataEnvVars)
 	validation.RegisterWebhook(hookserver, mgr.GetScheme())
 
 	if err := addWebhookInformers(ctx.Context, mgr.GetCache()); err != nil {
